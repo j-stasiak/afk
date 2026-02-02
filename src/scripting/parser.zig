@@ -14,7 +14,7 @@ const AstNodeType = enum {
 
 pub const AstNode = union(AstNodeType) {
     while_loop: struct {
-        contition: *AstNode,
+        condition: *AstNode,
         body: std.ArrayList(*AstNode)
     },
     if_statement: struct {
@@ -52,12 +52,12 @@ pub const Parser = struct {
 
     priority_map: std.AutoHashMap(u8, []const lx.TokenType),
 
-    pub fn init(allocator: std.mem.Allocator, tokens: []const lx.Token) Parser {
+    pub fn init(allocator: std.mem.Allocator, tokens: []const lx.Token) !Parser {
         var priority_map = std.AutoHashMap(u8, []const lx.TokenType).init(allocator);
-        priority_map.put(4, &.{.l_paren});
-        priority_map.put(3, &.{ .asterisk, .slash });
-        priority_map.put(2, &.{ .plus, .minus });
-        priority_map.put(1, &.{ .more_than, .more_than_equal, .less_than, .less_than_equal, .double_equals, .different_than });
+        try priority_map.put(4, &.{.l_paren});
+        try priority_map.put(3, &.{ .asterisk, .slash });
+        try priority_map.put(2, &.{ .plus, .minus });
+        try priority_map.put(1, &.{ .more_than, .more_than_equal, .less_than, .less_than_equal, .double_equals, .different_than });
 
         return .{
             .priority_map = priority_map.move(),
@@ -72,54 +72,89 @@ pub const Parser = struct {
 
     /// Receiver is responsible for freeing the whole AST
     pub fn parse(self: *Parser) !std.ArrayList(*AstNode) {
-        const statements = std.ArrayList(*AstNode){};
+        var statements: std.ArrayList(*AstNode) = .empty;
 
         while (!self.is_end()) {
             const statement = try self.process_next();
-            statements.append(self.allocator, statement);
+            try statements.append(self.allocator, statement);
         }
 
         return statements;
     }
 
-    fn process_next(self: *Parser) !*AstNode {
+    fn process_next(self: *Parser) error{UnexpectedToken}!*AstNode {
         const token = self.advance();
 
         const node = switch (token.type) {
-            .kw_while => self.while_loop(),
-            else => error.UnexpectedToken,
+            .kw_while => self.while_loop() catch unreachable,
+            .kw_if => self.if_statement() catch unreachable,
+            else => return error.UnexpectedToken,
         };
 
         return node;
     }
 
     fn while_loop(self: *Parser) !*AstNode {
-        _ = self.advance(); // consume while token
         _ = try self.expect_and_advance(.l_paren, "Expected opening parenthesis '('");
         const condition = try self.binary_operation();
         _ = try self.expect_and_advance(.r_paren, "Expected closing parenthesis ')'");
         _ = try self.expect_and_advance(.l_bracket, "Expected opening bracket '{'");
 
-        var body = std.ArrayList(*AstNode);
+        var body: std.ArrayList(*AstNode) = .empty;
         while (!self.is_end() and self.peek().type != .r_bracket) {
-            const statement = try self.process_next();
+            const statement = self.process_next() catch unreachable;
             try body.append(self.allocator, statement);
         }
 
-        _ = self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
+        _ = try self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
 
-        const node = self.allocator.create(AstNode);
+        const node = self.allocator.create(AstNode) catch unreachable;
 
         node.* = .{ .while_loop = .{
-            .contition = condition,
+            .condition = condition,
             .body = body,
         } };
 
         return node;
     }
 
+    fn if_statement(self: *Parser) !*AstNode {
+        _ = try self.expect_and_advance(.l_paren, "Expected opening parenthesis '('");
+        const condition = try self.binary_operation();
+        _ = try self.expect_and_advance(.r_paren, "Expected closing parenthesis ')'");
+        _ = try self.expect_and_advance(.l_bracket, "Expected opening bracket '{'");
+
+        var body: std.ArrayList(*AstNode) = .empty;
+        while (!self.is_end() and self.peek().type != .r_bracket) {
+            const statement = self.process_next() catch unreachable;
+            try body.append(self.allocator, statement);
+        }
+
+        _ = try self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
+
+        var else_branch: ?std.ArrayList(*AstNode) = undefined;
+        if (self.peek_next() != null and self.peek_next().?.type == .kw_else) {
+            _ = self.advance(); // consume kw_else
+            _ = self.advance(); // go to next
+            _ = try self.expect_and_advance(.l_bracket, "Expected opening bracket '{'");
+
+            else_branch.? = .empty;
+            while (!self.is_end() and self.peek().type != .r_bracket) {
+                const statement = self.process_next() catch unreachable;
+                try else_branch.?.append(self.allocator, statement);
+            }
+
+            _ = try self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
+        }
+
+        const node = self.allocator.create(AstNode) catch unreachable;
+
+        node.* = .{ .if_statement = .{ .condition = condition, .then_branch = body, .else_branch = else_branch } };
+
+        return node;
+    }
+
     fn binary_operation(self: *Parser) !*AstNode {
-        std.debug.print("Got: {any}", self.peek());
         // @TODO: Check binary ops with proper operation ordering
         // binary_op = <left> <operator> <right>
         // left = expression e.g. (a + 6) * 3 -> need to parse parenthesis properly
@@ -140,38 +175,32 @@ pub const Parser = struct {
                 return node;
             }
 
-            const node = self.create_literal();
+            const node = try self.create_literal();
             _ = self.advance();
             return node;
         }
 
-        const left = self.binary_operation_inner(current_priority + 1);
+        const left = self.binary_operation_inner(current_priority + 1) catch unreachable;
         const current_priority_operators = self.priority_map.get(current_priority);
 
-        var exists = false;
         for (current_priority_operators.?) |value| {
             if (self.peek().type == value) {
-                exists = true;
-                break;
+                const operator = self.peek().type;
+                _ = self.advance();
+                const right = self.binary_operation_inner(current_priority + 1) catch unreachable;
+
+                const node = self.allocator.create(AstNode) catch unreachable;
+                node.* = .{ .binary_op = .{
+                    .operator = operator,
+                    .left = left,
+                    .right = right,
+                } };
+
+                return node;
             }
         }
 
-        if (exists) {
-            const operator = self.peek().type;
-            _ = self.advance();
-            const right = self.binary_operation_inner(current_priority + 1);
-
-            const node = self.allocator.create(AstNode);
-            node.* = .{ .binary_op = .{
-                .operator = operator,
-                .left = left,
-                .right = right,
-            } };
-
-            return node;
-        }
-
-        return error.UnexpectedOperation;
+        return left;
     }
 
     fn create_literal(self: *Parser) !*AstNode {
@@ -187,7 +216,7 @@ pub const Parser = struct {
     fn create_identifier(self: *Parser) !*AstNode {
         const name = self.peek().value;
 
-        const node = self.allocator.create(AstNode);
+        const node = self.allocator.create(AstNode) catch unreachable;
         node.* = .{ .literal = .{ .identifier = name } };
 
         return node;
@@ -205,7 +234,7 @@ pub const Parser = struct {
             return error.UnexpectedBooleanValue;
         }
 
-        const node = self.allocator.create(AstNode);
+        const node = self.allocator.create(AstNode) catch unreachable;
         node.* = .{ .literal = .{ .boolean = parsed } };
 
         return node;
@@ -214,7 +243,7 @@ pub const Parser = struct {
     fn create_number(self: *Parser) !*AstNode {
         const value = try std.fmt.parseFloat(f32, self.peek().value);
 
-        const node = self.allocator.create(AstNode);
+        const node = self.allocator.create(AstNode) catch unreachable;
         node.* = .{ .literal = .{ .number = value } };
 
         return node;
@@ -224,7 +253,7 @@ pub const Parser = struct {
         const value = self.peek().value;
         const str = value[1 .. value.len - 1];
 
-        const node = self.allocator.create(AstNode);
+        const node = self.allocator.create(AstNode) catch unreachable;
         node.* = .{ .literal = .{ .string = str } };
 
         return node;
@@ -232,7 +261,7 @@ pub const Parser = struct {
 
     /// check if next token is of token_type and advance, throw error with provided message if it's not
     fn expect_and_advance(self: *Parser, token_type: lx.TokenType, error_message: []const u8) !lx.Token {
-        if (self.is_end() or self.peek() != token_type) {
+        if (self.is_end() or self.peek().type != token_type) {
             std.debug.print("Parse error on line {d}. Message: {s}", .{ self.peek().line, error_message });
             return error.ParseError;
         }
@@ -262,3 +291,90 @@ pub const Parser = struct {
         return if (self.current + 1 >= self.tokens.len) null else self.tokens[self.current + 1];
     }
 };
+
+fn freeNode(allocator: std.mem.Allocator, node: *AstNode) void {
+    switch (node.*) {
+        .while_loop => |wl| {
+            freeNode(allocator, wl.condition);
+            freeAST(allocator, wl.body);
+        },
+        .if_statement => |ifs| {
+            freeNode(allocator, ifs.condition);
+            freeAST(allocator, ifs.then_branch);
+            if (ifs.else_branch) |eb| {
+                freeAST(allocator, eb);
+            }
+        },
+        .function_definition => |fd| {
+            freeAST(allocator, fd.body);
+        },
+        .binary_op => |bo| {
+            freeNode(allocator, bo.left);
+            freeNode(allocator, bo.right);
+        },
+        .assignment => |a| {
+            freeNode(allocator, a.value);
+        },
+        .literal => {},
+    }
+
+    allocator.destroy(node);
+}
+
+pub fn freeAST(allocator: std.mem.Allocator, list: std.ArrayList(*AstNode)) void {
+    for (list.items) |node| {
+        freeNode(allocator, node);
+    }
+    var mutable = list;
+    mutable.deinit(allocator);
+}
+
+test "while loop parsing" {
+    const script = "while(a + b > c) {}";
+
+    var lexer: lx.Lexer = .{
+        .source = script,
+    };
+
+    var tokens: [11]lx.Token = .{undefined} ** 11;
+    for (tokens, 0..) |_, i| {
+        const token = lexer.tokenize() catch unreachable;
+        tokens[i] = token;
+    }
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var parser = Parser.init(gpa.allocator(), &tokens) catch unreachable;
+    defer parser.deinit();
+
+    const ast = try parser.parse();
+    defer freeAST(gpa.allocator(), ast);
+
+    try std.testing.expect(ast.items[0].* == .while_loop);
+}
+
+test "if statement parsing" {
+    const script = "if(a > 5) {}";
+
+    var lexer: lx.Lexer = .{
+        .source = script,
+    };
+
+    var tokens: [8]lx.Token = .{undefined} ** 8;
+    for (tokens, 0..) |_, i| {
+        const token = lexer.tokenize() catch unreachable;
+        tokens[i] = token;
+    }
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var parser = Parser.init(gpa.allocator(), &tokens) catch unreachable;
+    defer parser.deinit();
+
+    const ast = try parser.parse();
+    defer freeAST(gpa.allocator(), ast);
+
+    try std.testing.expect(ast.items[0].* == .if_statement);
+}

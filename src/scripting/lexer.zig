@@ -47,7 +47,7 @@ pub const Lexer = struct {
     current_pos: usize = 0,
     line: usize = 1,
 
-    fn tokenize(self: *Lexer) !Token {
+    pub fn tokenize(self: *Lexer) !Token {
         self.skip_whitespaces();
 
         if (self.is_end()) {

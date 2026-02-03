@@ -88,6 +88,7 @@ pub const Parser = struct {
         const node = switch (token.type) {
             .kw_while => self.while_loop() catch unreachable,
             .kw_if => self.if_statement() catch unreachable,
+            .kw_fn => self.function_declaration() catch unreachable,
             else => return error.UnexpectedToken,
         };
 
@@ -154,19 +155,45 @@ pub const Parser = struct {
         return node;
     }
 
-    fn binary_operation(self: *Parser) !*AstNode {
-        // @TODO: Check binary ops with proper operation ordering
-        // binary_op = <left> <operator> <right>
-        // left = expression e.g. (a + 6) * 3 -> need to parse parenthesis properly
-        // operator = oneof TokenType (>, >=, ==, <, <=)
-        // right = expression same a left
-        // my god this seems like a pain...
+    fn function_declaration(self: *Parser) !*AstNode {
+        const name_token = try self.expect_and_advance(.identifier, "Expected function name");
+        _ = try self.expect_and_advance(.l_paren, "Expected opening parenthesis '('");
 
+        var arg_count = 0;
+        while (!self.is_end() and self.peek().type != .r_paren) {
+            if (arg_count != 0) {
+                _ = try self.expect_and_advance(.comma, "Expected parameter separator ','");
+            }
+            _ = try self.expect_and_advance(.identifier, "Expected parameter name");
+            arg_count += 1;
+        }
+
+        _ = self.advance();
+        _ = try self.expect_and_advance(.l_bracket, "Expected opening bracket '{'");
+
+        var body: std.ArrayList(*AstNode) = .empty;
+        while (!self.is_end() and self.peek().type != .r_bracket) {
+            const statement = self.process_next() catch unreachable;
+            try body.append(self.allocator, statement);
+        }
+        _ = try self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
+
+        if (body.items.len == 0) {
+            std.debug.print("Expected non-empty function body");
+            return error.EmptyFunctionBody;
+        }
+
+        const node = self.allocator.create(AstNode) catch unreachable;
+        node.* = .{ .function_definition = .{ .name = name_token.value, .arg_count = arg_count, .body = body } };
+
+        return node;
+    }
+
+    fn binary_operation(self: *Parser) !*AstNode {
         return self.binary_operation_inner(1);
     }
 
     fn binary_operation_inner(self: *Parser, current_priority: u8) !*AstNode {
-        // @TODO add advances so we don't end up checking same token over and over...
         if (current_priority >= 4) {
             if (self.peek().type == .l_paren) {
                 _ = self.advance();

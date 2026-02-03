@@ -132,7 +132,7 @@ pub const Parser = struct {
 
         _ = try self.expect_and_advance(.r_bracket, "Expected closing bracket '}'");
 
-        var else_branch: ?std.ArrayList(*AstNode) = undefined;
+        var else_branch: ?std.ArrayList(*AstNode) = null;
         if (self.peek_next() != null and self.peek_next().?.type == .kw_else) {
             _ = self.advance(); // consume kw_else
             _ = self.advance(); // go to next
@@ -352,6 +352,12 @@ test "while loop parsing" {
     defer freeAST(gpa.allocator(), ast);
 
     try std.testing.expect(ast.items[0].* == .while_loop);
+    const loop = ast.items[0].while_loop;
+    try std.testing.expect(loop.condition.* == .binary_op);
+    const binary_op = loop.condition.binary_op;
+    try std.testing.expect(binary_op.operator == .more_than);
+    try std.testing.expect(binary_op.right.* == .literal);
+    try std.testing.expect(binary_op.left.* == .binary_op);
 }
 
 test "if statement parsing" {
@@ -361,7 +367,7 @@ test "if statement parsing" {
         .source = script,
     };
 
-    var tokens: [8]lx.Token = .{undefined} ** 8;
+    var tokens: [9]lx.Token = .{undefined} ** 9;
     for (tokens, 0..) |_, i| {
         const token = lexer.tokenize() catch unreachable;
         tokens[i] = token;
@@ -377,4 +383,9 @@ test "if statement parsing" {
     defer freeAST(gpa.allocator(), ast);
 
     try std.testing.expect(ast.items[0].* == .if_statement);
+    const statement = ast.items[0].if_statement;
+    try std.testing.expect(statement.condition.* == .binary_op);
+    const binary_op = statement.condition.binary_op;
+    try std.testing.expect(binary_op.left.literal == .identifier);
+    try std.testing.expect(binary_op.right.literal == .number);
 }
